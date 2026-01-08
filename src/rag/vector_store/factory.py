@@ -32,7 +32,7 @@ class VectorStoreFactory:
                 return PineconeVectorStore(**kwargs)
             except ImportError:
                 raise ImportError(
-                    "Pinecone store requires: pip install 'kusuma[pinecone]'"
+                    "Pinecone store requires: pip install '[pinecone]'"
                 )
         
         elif store_type == "weaviate":
@@ -41,7 +41,7 @@ class VectorStoreFactory:
                 return WeaviateVectorStore(**kwargs)
             except ImportError:
                 raise ImportError(
-                    "Weaviate store requires: pip install 'kusuma[weaviate]'"
+                    "Weaviate store requires: pip install '[weaviate]'"
                 )
         
         elif store_type == "milvus":
@@ -50,7 +50,7 @@ class VectorStoreFactory:
                 return MilvusVectorStore(**kwargs)
             except ImportError:
                 raise ImportError(
-                    "Milvus store requires: pip install 'kusuma[milvus]'"
+                    "Milvus store requires: pip install '[milvus]'"
                 )
         
         else:

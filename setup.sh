@@ -1,10 +1,10 @@
 #!/bin/bash
-# Quick setup script for KUSUMA RAG System
+# Quick setup script for RAG System
 
 set -e
 
 echo "=========================================="
-echo "KUSUMA RAG System - Quick Setup"
+echo "RAG System - Quick Setup"
 echo "=========================================="
 
 # Check Python version
