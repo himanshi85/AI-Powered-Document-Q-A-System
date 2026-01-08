@@ -1,0 +1,39 @@
+# Frequently Asked Questions - Smart Coffee Maker X2000
+
+## General Questions
+
+**Q: Can I use pre-ground coffee?**
+A: Yes. Our machine is compatible with all standard coffee grounds. For best results, use medium-ground coffee. Fine grounds may cause slower brewing.
+
+**Q: What water temperature is best?**
+A: We recommend 195-200°F (90-93°C) for optimal extraction. This can be adjusted in the app settings.
+
+**Q: How often should I clean the machine?**
+A: Daily: Empty grounds, rinse filter basket. Weekly: Clean water reservoir. Monthly: Run descaling cycle with white vinegar (1:1 ratio with water).
+
+## WiFi & App Issues
+
+**Q: My phone can't find the device in the app.**
+A: 
+1. Ensure device is powered on
+2. Make sure your phone is on same WiFi network as device
+3. Go to app Settings > Forget Device > Re-add Device
+4. Enter your WiFi credentials when prompted
+
+**Q: Does the app work offline?**
+A: No. The app requires WiFi connectivity to communicate with the device. You can use physical buttons for basic operation.
+
+**Q: Can multiple phones control the same machine?**
+A: Yes. Up to 5 devices can be linked to one machine. Additional devices require premium subscription.
+
+## Technical Support
+
+**Q: What should I do if the machine won't turn on?**
+A:
+1. Check power cable is firmly connected
+2. Verify outlet works (test with another device)
+3. Press power button for 3 seconds (not just a tap)
+4. If still unresponsive, unplug for 2 minutes then try again
+
+**Q: How do I factory reset the device?**
+A: Hold the reset button (on bottom) for 10 seconds until light blinks red. Device will restart.

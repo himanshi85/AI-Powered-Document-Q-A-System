@@ -1,0 +1,49 @@
+# Product Manual: Smart Coffee Maker X2000
+
+## Overview
+The Smart Coffee Maker X2000 is a connected beverage appliance featuring WiFi connectivity, mobile app control, and programmable brewing schedules.
+
+## Specifications
+- Capacity: 12 cups (1.8L)
+- Brew Time: 5-8 minutes
+- Temperature: Adjustable 185-205°F (85-96°C)
+- Power: 1200W
+- WiFi: 802.11b/g/n (2.4GHz)
+- App: Compatible with iOS 12+ and Android 7+
+
+## Quick Start
+1. Fill water reservoir with fresh, cold water
+2. Add ground coffee to filter basket (1 tablespoon per cup)
+3. Press power button or use mobile app
+4. Brew completes when all water is dispensed
+
+## Mobile App Features
+- Schedule brewing up to 7 days in advance
+- Monitor brew progress in real-time
+- Adjust temperature remotely
+- Receive notifications when coffee is ready
+- View brewing history and statistics
+
+## Troubleshooting
+
+### Coffee is too weak
+- Use more coffee grounds (currently using 1 tablespoon per cup)
+- Increase brew time in settings
+- Ensure water temperature is set to maximum (205°F)
+
+### WiFi connection fails
+- Restart the device (unplug for 30 seconds)
+- Ensure 2.4GHz WiFi network is available
+- Check WiFi password is correct in app settings
+- Factory reset if problem persists (hold reset button 10 seconds)
+
+### App shows "Device Offline"
+- Check your device is powered on
+- Verify WiFi network is accessible
+- Check router firewall isn't blocking the device
+- Reinstall the mobile app and reconnect
+
+## Warranty & Support
+- 2-year manufacturer warranty
+- Technical support: support@coffeemake.com
+- Call: 1-800-COFFEE-1
