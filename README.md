@@ -10,6 +10,10 @@ Upload documents → Process → Ask questions → Get grounded answers with sou
 
 
 
+https://github.com/user-attachments/assets/475b090e-9da4-43ac-a95f-503bad1977e0
+
+
+
 ---
 
 ## 🚀 Features
