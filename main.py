@@ -1,162 +1,224 @@
-"""Main RAG pipeline example with Gemini LLM"""
-
 import os
-from dotenv import load_dotenv
-import google.generativeai as genai
+from pathlib import Path
 
-from src.rag.document_processing import DocumentProcessor
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+from src.rag.document_processing.processor import DocumentProcessor
 from src.rag.vector_store import VectorStoreFactory
-from src.rag.retrieval import HybridRetriever
+from src.rag.retrieval import HybridRetriever, CrossEncoderReranker
 from src.rag.generation import RAGGenerator
 from src.rag.generation.prompts import GroundingPrompts
 
 
+# -----------------------------------------------------------------------------
+# ENV + CONFIG
+# -----------------------------------------------------------------------------
+load_dotenv()
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    raise ValueError("Set GOOGLE_API_KEY in .env")
+
+genai.configure(api_key=GOOGLE_API_KEY)
+
+CONFIG = {
+    "target_tokens": 350,
+    "overlap_tokens": 60,
+    "dense_weight": 0.6,
+    "sparse_weight": 0.4,
+    "min_context_score": 0.2,
+    "top_k": 5,
+    "max_chunks_per_document": 3,
+    "embedding_model": "models/gemini-embedding-001",
+    "generation_model": "models/gemini-2.5-flash",
+}
+
+def estimate_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text.split()))
+
+
+def make_chunk_backward_compatible(chunk) -> None:
+    if not hasattr(chunk, "token_count"):
+        chunk.token_count = estimate_token_count(chunk.content)
+
+    if not hasattr(chunk, "source_doc"):
+        title = None
+        if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+            title = chunk.metadata.get("title")
+        chunk.source_doc = title or getattr(chunk, "source_path", "Unknown Source")
+
+
+def make_document_display_compatible(doc) -> None:
+    if not hasattr(doc, "filename"):
+        source_name = Path(
+            getattr(doc, "source_path", getattr(doc, "title", "document"))
+        ).name
+        doc.filename = source_name
+
+
 def setup_embedding_fn():
-    """Setup embedding function using Gemini"""
     def embed_text(text: str):
-        """Embed text using Gemini's embedding model"""
-        try:
-            result = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=text,
-            )
-            return result['embedding']
-        except Exception as e:
-            print(f"Embedding failed: {e}")
-            # Return a dummy embedding on failure
-            return [0.0] * 768
-    
+        result = genai.embed_content(
+            model=CONFIG["embedding_model"],
+            content=text,
+        )
+
+        if isinstance(result, dict):
+            return result["embedding"]
+
+        if hasattr(result, "embedding"):
+            return result.embedding
+
+        raise ValueError("Unexpected embedding response format.")
+
     return embed_text
 
 
 def setup_llm_fn():
-    """Setup LLM function using Gemini"""
     system_instruction = GroundingPrompts.system_prompt()
     model = genai.GenerativeModel(
-        "models/gemini-2.5-flash",
-        system_instruction=system_instruction
+        CONFIG["generation_model"],
+        system_instruction=system_instruction,
     )
-    
+
     def generate_response(prompt: str) -> str:
-        """Generate response using Gemini"""
-        try:
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            return f"Error generating response: {e}"
-    
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", None)
+        if not text:
+            raise ValueError("Empty text response from generation model.")
+        return text
+
     return generate_response
 
 
+def print_pipeline_summary(documents, chunks):
+    print("\n" + "=" * 80)
+    print("PIPELINE SUMMARY")
+    print("=" * 80)
+    print(f"Documents loaded : {len(documents)}")
+    print(f"Chunks created   : {len(chunks)}")
+    print(f"Estimated tokens : {sum(getattr(c, 'token_count', 0) for c in chunks)}")
+
+    print("\nDocuments:")
+    for i, doc in enumerate(documents, 1):
+        print(
+            f"  {i}. {getattr(doc, 'filename', doc.title)} "
+            f"(type={doc.doc_type}, chars={len(doc.content)})"
+        )
+
+
+# -----------------------------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------------------------
 def main():
-    """Main RAG pipeline demonstration"""
-    
-    # Load environment
-    load_dotenv()
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise ValueError("GOOGLE_API_KEY not set. Please configure .env file.")
-    
-    genai.configure(api_key=api_key)
-    
-    print("=" * 80)
-    print("RAG System for Product Documentation QA")
-    print("=" * 80)
-    
-    # Step 1: Load and process documents
-    print("\n[1] DOCUMENT PROCESSING")
-    print("-" * 80)
-    processor = DocumentProcessor(chunk_size=400, chunk_overlap=100)
-    
-    docs = processor.load_documents("data/")
-    print(f"✓ Loaded {len(docs)} documents")
-    for doc in docs:
-        print(f"  - {doc.filename} ({len(doc.content)} chars)")
-    
-    chunks = processor.process()
-    print(f"✓ Created {len(chunks)} chunks")
-    print(f"  Total tokens: {sum(c.token_count for c in chunks)}")
-    
-    # Step 2: Setup vector store
-    print("\n[2] VECTOR STORE SETUP")
-    print("-" * 80)
-    vector_store = VectorStoreFactory.create("in_memory")
-    print("✓ Created in-memory vector store")
-    
-    # Setup embedding function
+    data_dir = input("Enter folder path containing documents: ").strip()
+
+    if not data_dir:
+        raise ValueError("Folder path cannot be empty.")
+
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(f"Folder not found: {data_dir}")
+
+    print("Initializing RAG pipeline...")
+
+    processor = DocumentProcessor(
+        target_tokens=CONFIG["target_tokens"],
+        overlap_tokens=CONFIG["overlap_tokens"],
+    )
+
+    print("\n[1/5] Loading documents...")
+    documents = processor.load_documents_from_directory(data_dir)
+
+    if not documents:
+        raise ValueError(
+            "No supported documents found in the folder. "
+            "Add TXT, MD, JSON, CSV, PDF, or DOCX files."
+        )
+
+    for doc in documents:
+        make_document_display_compatible(doc)
+
+    print("[2/5] Creating chunks...")
+    chunks = processor.process_documents(documents)
+
+    for chunk in chunks:
+        make_chunk_backward_compatible(chunk)
+
+    print_pipeline_summary(documents, chunks)
+
+    print("\n[3/5] Creating embeddings...")
     embedding_fn = setup_embedding_fn()
-    print("✓ Setup Gemini embedding function")
-    
-    # Embed and store chunks
-    print("Embedding and storing chunks...")
-    for i, chunk in enumerate(chunks):
-        if i % max(1, len(chunks) // 4) == 0:
-            print(f"  Progress: {i}/{len(chunks)}")
-        try:
-            embedding = embedding_fn(chunk.content)
-            chunk.embedding = embedding
-        except Exception as e:
-            print(f"Embedding failed for chunk {chunk.chunk_id}: {e}")
-    
+
+    for i, chunk in enumerate(chunks, 1):
+        chunk.embedding = embedding_fn(chunk.content)
+        if i % 10 == 0 or i == len(chunks):
+            print(f"  Embedded {i}/{len(chunks)} chunks")
+
+    print("\n[4/5] Building vector store...")
+    vector_store = VectorStoreFactory.create("in_memory")
     vector_store.add_chunks(chunks)
-    stats = vector_store.get_stats()
-    print(f"✓ Vector store ready: {stats}")
-    
-    # Step 3: Setup retrieval
-    print("\n[3] RETRIEVAL SETUP")
-    print("-" * 80)
+
+    print("[5/5] Initializing retriever and generator...")
+    reranker = CrossEncoderReranker(
+        model_name="cross-encoder/ms-marco-MiniLM-L6-v2",
+        enabled=True,
+    )
+
     retriever = HybridRetriever(
         vector_store=vector_store,
         embedding_fn=embedding_fn,
-        dense_weight=0.6,
-        sparse_weight=0.4,
+        dense_weight=CONFIG["dense_weight"],
+        sparse_weight=CONFIG["sparse_weight"],
+        max_chunks_per_document=CONFIG["max_chunks_per_document"],
+        reranker=reranker,
+        rerank_top_n=15,
+        rerank_weight=0.35,
     )
-    print("✓ Hybrid retriever configured (60% dense, 40% sparse)")
-    
-    # Step 4: Setup generation
-    print("\n[4] GENERATION SETUP")
-    print("-" * 80)
+
+    if reranker.available():
+        print("Reranker enabled: cross-encoder/ms-marco-MiniLM-L6-v2")
+    else:
+        print("Reranker unavailable. Continuing with hybrid retrieval only.")
+
     llm_fn = setup_llm_fn()
-    print("✓ Gemini LLM configured")
-    
     generator = RAGGenerator(
         retriever=retriever,
         llm_fn=llm_fn,
-        min_context_score=0.2,
-        top_k=5,
+        min_context_score=CONFIG["min_context_score"],
+        top_k=CONFIG["top_k"],
     )
-    print("✓ RAG generator ready")
-    
-    # Step 5: Run example queries
-    print("\n[5] EXAMPLE QUERIES")
-    print("=" * 80)
-    
-    queries = [
-        "How do I troubleshoot WiFi connection issues?",
-        # "What is the recommended water temperature for brewing?",
-        # "Can multiple phones control the same coffee maker?",
-        # "How often should I clean the machine?",
-    ]
-    
-    for i, query in enumerate(queries, 1):
-        print(f"\nQuery {i}: {query}")
-        print("-" * 80)
-        
-        response = generator.generate(query, use_verification=False)
-        
-        print(f"Answer: {response['answer'][:500]}...")
-        print(f"Sources: {', '.join(response['sources'])}")
-        print(f"Confidence: {response['confidence']:.2f}")
-        print(f"Retrieved {response['num_context_chunks']} context chunks")
-        
-        if response['chunk_scores']:
-            print("Chunk scores:")
-            for score in response['chunk_scores'][:3]:
-                print(f"  - {score['chunk_id']}: {score['score']:.3f}")
-    
-    print("\n" + "=" * 80)
-    print("RAG Pipeline demonstration complete!")
-    print("=" * 80)
+
+    print("\nSystem ready. Type 'exit' to quit.\n")
+
+    while True:
+        q = input("Query: ").strip()
+        if q.lower() == "exit":
+            print("Exiting.")
+            break
+
+        if not q:
+            continue
+
+        try:
+            res = generator.generate(q)
+
+            print("\nAnswer:")
+            print(res["answer"])
+            print(f"\nConfidence: {res['confidence']:.2f}")
+
+            if res.get("sources"):
+                print("Sources:")
+                for source in res["sources"]:
+                    print(f"  - {source}")
+
+            print("\n" + "-" * 80)
+
+        except Exception as e:
+            print(f"Error: {e}")
+            print("-" * 80)
 
 
 if __name__ == "__main__":

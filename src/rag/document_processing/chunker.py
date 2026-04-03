@@ -1,121 +1,163 @@
-"""Semantic chunking strategies for documents"""
-
 import re
-from typing import List, Optional
-from src.rag.document_processing.models import DocumentChunk
+from typing import List
+
+from .models import Document, DocumentChunk
+
+try:
+    import tiktoken
+except ImportError:
+    tiktoken = None
 
 
 class SemanticChunker:
     """
-    Chunks documents into semantically coherent units.
-    Supports both fixed-size and semantic-aware chunking.
+    Metadata-aware chunker with approximate token control and overlap.
+    It first splits into paragraphs, then sentences, then groups them
+    into chunks close to target_tokens.
     """
-    
-    def __init__(
-        self,
-        chunk_size: int = 400,
-        chunk_overlap: int = 100,
-        min_chunk_size: int = 50,
-    ):
-        """
-        Initialize the chunker.
-        
-        Args:
-            chunk_size: Target tokens per chunk (approximate)
-            chunk_overlap: Tokens to overlap between chunks
-            min_chunk_size: Minimum chunk size to avoid tiny fragments
-        """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.min_chunk_size = min_chunk_size
-    
-    def _count_tokens_approx(self, text: str) -> int:
-        """Approximate token count (simple word-based estimate)"""
-        return len(text.split())
-    
-    def _split_on_delimiters(self, text: str) -> List[str]:
-        """Split text on semantic boundaries (sentences, paragraphs)"""
-        # Split on double newlines (paragraphs)
-        paragraphs = text.split('\n\n')
-        segments = []
-        
-        for para in paragraphs:
-            if not para.strip():
-                continue
-            # Further split on sentences
-            sentences = re.split(r'(?<=[.!?])\s+', para.strip())
-            segments.extend(sentences)
-        
-        return [s.strip() for s in segments if s.strip()]
-    
-    def chunk(
-        self,
-        text: str,
-        doc_id: str,
-        source_doc: str,
-        metadata: Optional[dict] = None,
-    ) -> List[DocumentChunk]:
-        """
-        Chunk a document into semantic units.
-        
-        Args:
-            text: Document content to chunk
-            doc_id: Document ID
-            source_doc: Source filename
-            metadata: Optional document metadata
-            
-        Returns:
-            List of DocumentChunk objects
-        """
-        if metadata is None:
-            metadata = {}
-        
-        # Split into segments
-        segments = self._split_on_delimiters(text)
-        
-        chunks = []
-        current_chunk = []
-        current_char_pos = 0
+
+    def __init__(self, target_tokens: int = 350, overlap_tokens: int = 60):
+        self.target_tokens = target_tokens
+        self.overlap_tokens = overlap_tokens
+        self.tokenizer = None
+
+        if tiktoken is not None:
+            try:
+                self.tokenizer = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                self.tokenizer = None
+
+    def _count_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        if self.tokenizer:
+            return len(self.tokenizer.encode(text))
+        return max(1, len(text.split()))
+
+    def _normalize_text(self, text: str) -> str:
+        text = text.replace("\x00", " ")
+        text = re.sub(r"\r\n?", "\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _split_into_paragraphs(self, text: str) -> List[str]:
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        return paragraphs if paragraphs else [text]
+
+    def _split_into_sentences(self, text: str) -> List[str]:
+        # Simple sentence splitter
+        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        return [p.strip() for p in parts if p.strip()]
+
+    def _split_large_paragraph(self, paragraph: str) -> List[str]:
+        if self._count_tokens(paragraph) <= self.target_tokens:
+            return [paragraph]
+
+        sentences = self._split_into_sentences(paragraph)
+        if not sentences:
+            return [paragraph]
+
+        groups = []
+        current = []
+        current_tokens = 0
+
+        for sentence in sentences:
+            sent_tokens = self._count_tokens(sentence)
+
+            if current and current_tokens + sent_tokens > self.target_tokens:
+                groups.append(" ".join(current).strip())
+                current = [sentence]
+                current_tokens = sent_tokens
+            else:
+                current.append(sentence)
+                current_tokens += sent_tokens
+
+        if current:
+            groups.append(" ".join(current).strip())
+
+        return groups
+
+    def _create_overlap_text(self, chunk_text: str) -> str:
+        words = chunk_text.split()
+        if not words:
+            return ""
+        overlap_word_count = min(len(words), self.overlap_tokens)
+        return " ".join(words[-overlap_word_count:])
+
+    def chunk_document(self, document: Document) -> List[DocumentChunk]:
+        text = self._normalize_text(document.text)
+        paragraphs = self._split_into_paragraphs(text)
+
+        units = []
+        for paragraph in paragraphs:
+            units.extend(self._split_large_paragraph(paragraph))
+
+        chunks: List[DocumentChunk] = []
+        current_parts = []
+        current_tokens = 0
+        current_start = 0
+        running_char_pointer = 0
         chunk_index = 0
-        
-        for segment in segments:
-            current_chunk.append(segment)
-            current_tokens = self._count_tokens_approx(' '.join(current_chunk))
-            
-            # Create chunk if we exceed size or this is the last segment
-            if current_tokens >= self.chunk_size or segment == segments[-1]:
-                chunk_text = ' '.join(current_chunk)
-                
-                if self._count_tokens_approx(chunk_text) >= self.min_chunk_size:
-                    chunk_id = f"{doc_id}_chunk_{chunk_index}"
-                    start_char = text.find(chunk_text)
-                    end_char = start_char + len(chunk_text)
-                    
-                    chunk = DocumentChunk(
-                        chunk_id=chunk_id,
-                        content=chunk_text,
-                        source_doc=source_doc,
+
+        for unit in units:
+            unit_tokens = self._count_tokens(unit)
+
+            if current_parts and current_tokens + unit_tokens > self.target_tokens:
+                chunk_text = "\n\n".join(current_parts).strip()
+                end_char = current_start + len(chunk_text)
+
+                chunks.append(
+                    DocumentChunk(
+                        chunk_id=f"{document.document_id}_chunk_{chunk_index}",
+                        document_id=document.document_id,
+                        text=chunk_text,
                         chunk_index=chunk_index,
-                        start_char=start_char if start_char >= 0 else current_char_pos,
-                        end_char=end_char if end_char >= 0 else current_char_pos + len(chunk_text),
-                        token_count=self._count_tokens_approx(chunk_text),
-                        metadata=metadata.copy(),
+                        start_char=current_start,
+                        end_char=end_char,
+                        source_path=document.source_path,
+                        doc_type=document.doc_type,
+                        metadata={
+                            **document.metadata,
+                            "title": document.title,
+                            "chunk_index": chunk_index,
+                        },
                     )
-                    chunks.append(chunk)
-                    chunk_index += 1
-                    current_char_pos += len(chunk_text) + 1
-                
-                # Reset for next chunk, keeping overlap
-                if current_tokens >= self.chunk_size:
-                    overlap_segments = []
-                    remaining_tokens = 0
-                    for seg in reversed(current_chunk):
-                        overlap_segments.insert(0, seg)
-                        remaining_tokens += self._count_tokens_approx(seg)
-                        if remaining_tokens >= self.chunk_overlap:
-                            break
-                    current_chunk = overlap_segments
-                else:
-                    current_chunk = []
-        
+                )
+
+                overlap_text = self._create_overlap_text(chunk_text)
+                current_parts = [overlap_text, unit] if overlap_text else [unit]
+                current_tokens = self._count_tokens(" ".join(current_parts))
+                current_start = max(0, end_char - len(overlap_text))
+                chunk_index += 1
+            else:
+                if not current_parts:
+                    current_start = running_char_pointer
+                current_parts.append(unit)
+                current_tokens += unit_tokens
+
+            running_char_pointer += len(unit) + 2
+
+        if current_parts:
+            chunk_text = "\n\n".join(current_parts).strip()
+            end_char = current_start + len(chunk_text)
+
+            chunks.append(
+                DocumentChunk(
+                    chunk_id=f"{document.document_id}_chunk_{chunk_index}",
+                    document_id=document.document_id,
+                    text=chunk_text,
+                    chunk_index=chunk_index,
+                    start_char=current_start,
+                    end_char=end_char,
+                    source_path=document.source_path,
+                    doc_type=document.doc_type,
+                    metadata={
+                        **document.metadata,
+                        "title": document.title,
+                        "chunk_index": chunk_index,
+                    },
+                )
+            )
+
         return chunks

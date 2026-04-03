@@ -1,122 +1,76 @@
-"""Grounding prompts for strict context adherence"""
+from typing import List
+
+from src.rag.document_processing.models import RetrievalResult
 
 
 class GroundingPrompts:
-    """Structured prompts designed for strict context grounding"""
-    
+    """
+    Prompt builder for grounded RAG answering.
+    """
+
     @staticmethod
     def system_prompt() -> str:
-        """System prompt enforcing strict context adherence"""
-        return """You are a helpful technical support assistant for product documentation.
+        return (
+            "You are a retrieval-grounded assistant. "
+            "Answer the user's question using ONLY the provided context chunks. "
+            "Do not invent facts, steps, policies, numbers, or explanations that are not supported by the context. "
+            "If the context is insufficient, clearly say that the answer is not available in the provided documents. "
+            "When possible, synthesize information across multiple chunks, but stay faithful to the text. "
+            "Prefer concise, precise, and factual answers. "
+            "Do not claim certainty when the context is partial or ambiguous."
+        )
 
-CRITICAL INSTRUCTION: You MUST only answer questions using the provided context documents.
-
-Rules:
-1. ONLY use information from the provided context chunks.
-2. If the context doesn't contain the answer, respond: "I don't have information about that in the documentation."
-3. Do NOT use external knowledge or make assumptions.
-4. Always cite which document(s) your answer comes from.
-5. If you're uncertain, ask for clarification or say you need more information.
-6. Be concise and clear in your responses.
-7. Format citations as: [Source: document_name]"""
-    
     @staticmethod
-    def build_rag_prompt(
-        query: str,
-        context_chunks: list[str],
-        sources: list[str],
-    ) -> str:
+    def format_context(results: List[RetrievalResult]) -> str:
         """
-        Build a complete RAG prompt with context.
-        
-        Args:
-            query: User question
-            context_chunks: List of relevant document chunks
-            sources: List of source document names
-            
-        Returns:
-            Complete prompt with context
+        Build a structured context block for the LLM.
         """
-        context_text = "\n\n".join([
-            f"[Source: {source}]\n{chunk}"
-            for chunk, source in zip(context_chunks, sources)
-        ])
-        
-        prompt = f"""Based on the following documentation excerpts, answer the question.
+        if not results:
+            return "No context available."
 
-DOCUMENTATION CONTEXT:
-{context_text}
+        context_parts = []
 
-QUESTION: {query}
+        for i, result in enumerate(results, start=1):
+            chunk = result.chunk
 
-ANSWER:"""
-        return prompt
-    
+            source_name = None
+            if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+                source_name = chunk.metadata.get("title")
+
+            if not source_name:
+                source_name = getattr(chunk, "source_path", "Unknown Source")
+
+            chunk_index = getattr(chunk, "chunk_index", i - 1)
+
+            context_parts.append(
+                f"[CHUNK {i}]\n"
+                f"Source: {source_name}\n"
+                f"Chunk ID: {chunk.chunk_id}\n"
+                f"Original Chunk Index: {chunk_index}\n"
+                f"Retrieval Score: {result.score:.4f}\n"
+                f"Dense Score: {result.dense_score:.4f}\n"
+                f"Sparse Score: {result.sparse_score:.4f}\n"
+                f"Content:\n{chunk.content}\n"
+            )
+
+        return "\n" + ("\n" + "-" * 80 + "\n").join(context_parts)
+
     @staticmethod
-    def build_verification_prompt(
-        original_query: str,
-        retrieved_chunks: list[str],
-        model_response: str,
-    ) -> str:
-        """
-        Build a prompt for verifying if response is grounded in context.
-        """
-        context_text = "\n\n".join(retrieved_chunks)
-        
-        prompt = f"""Verify if the following response is grounded in the provided documentation.
+    def user_prompt(query: str, results: List[RetrievalResult]) -> str:
+        context_block = GroundingPrompts.format_context(results)
 
-DOCUMENTATION:
-{context_text}
-
-ORIGINAL QUESTION: {original_query}
-
-MODEL RESPONSE: {model_response}
-
-VERIFICATION QUESTIONS:
-1. Does the response only use information from the documentation?
-2. Are all claims properly sourced?
-3. Is there any information that seems to come from outside the documentation?
-
-Provide a brief verification result."""
-        return prompt
-
-
-class ResponseBuilder:
-    """Build structured responses with citations"""
-    
-    @staticmethod
-    def build_response(
-        answer: str,
-        sources: list[str],
-        confidence: float = 1.0,
-    ) -> dict:
-        """
-        Build a structured response with metadata.
-        
-        Args:
-            answer: The generated answer
-            sources: List of source documents
-            confidence: Confidence score (0-1)
-            
-        Returns:
-            Structured response dictionary
-        """
-        return {
-            "answer": answer,
-            "sources": list(set(sources)),  # Deduplicate sources
-            "confidence": confidence,
-            "grounded": True,
-        }
-    
-    @staticmethod
-    def build_fallback_response(
-        query: str,
-        reason: str = "No relevant information found",
-    ) -> dict:
-        """Build a response when no context is available"""
-        return {
-            "answer": f"I don't have information about that in the documentation. {reason}",
-            "sources": [],
-            "confidence": 0.0,
-            "grounded": False,
-        }
+        return (
+            f"User Question:\n{query}\n\n"
+            f"Retrieved Context:\n{context_block}\n\n"
+            "Instructions:\n"
+            "1. Answer ONLY from the retrieved context above.\n"
+            "2. If the answer is fully supported, provide a direct answer.\n"
+            "3. If the answer is partially supported, clearly say what is supported and what is missing.\n"
+            "4. If the answer is not present, say that the provided documents do not contain enough information.\n"
+            "5. After the answer, include a short section called 'Evidence Used' listing the chunk numbers you relied on.\n"
+            "6. Do not mention any knowledge outside the provided context.\n"
+            "7. Do not fabricate citations.\n\n"
+            "Response format:\n"
+            "Answer: <your grounded answer>\n"
+            "Evidence Used: <example: CHUNK 1, CHUNK 3>\n"
+        )

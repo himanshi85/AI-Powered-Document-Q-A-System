@@ -1,5 +1,4 @@
-"""Retrieval layer with hybrid search support"""
+from .retriever import HybridRetriever
+from .reranker import CrossEncoderReranker
 
-from src.rag.retrieval.retriever import HybridRetriever
-
-__all__ = ["HybridRetriever"]
+__all__ = ["HybridRetriever", "CrossEncoderReranker"]

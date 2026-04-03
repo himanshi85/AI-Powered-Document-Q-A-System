@@ -1,154 +1,224 @@
-"""Main RAG generator combining retrieval and generation"""
+from typing import Dict, List
 
-from typing import Optional, Callable, List, Dict
-from src.rag.retrieval.retriever import HybridRetriever
-from src.rag.generation.prompts import GroundingPrompts, ResponseBuilder
 from src.rag.document_processing.models import RetrievalResult
+from src.rag.generation.prompts import GroundingPrompts
 
 
 class RAGGenerator:
     """
-    Complete RAG pipeline: retrieves context and generates grounded responses.
+    Retrieval-augmented answer generator with:
+    - grounded prompting
+    - context filtering
+    - source tracking
+    - confidence estimation
+    - evidence-aware outputs
     """
-    
+
     def __init__(
         self,
-        retriever: HybridRetriever,
-        llm_fn: Callable[[str], str],
-        min_context_score: float = 0.3,
+        retriever,
+        llm_fn,
+        min_context_score: float = 0.2,
         top_k: int = 5,
     ):
-        """
-        Initialize RAG generator.
-        
-        Args:
-            retriever: HybridRetriever instance
-            llm_fn: Function to call LLM (takes prompt, returns response)
-            min_context_score: Minimum relevance score for context
-            top_k: Number of context chunks to retrieve
-        """
         self.retriever = retriever
         self.llm_fn = llm_fn
         self.min_context_score = min_context_score
         self.top_k = top_k
-    
+
+    def _filter_relevant_results(
+        self,
+        results: List[RetrievalResult],
+    ) -> List[RetrievalResult]:
+        """
+        Filter out weak retrieval results before sending to the LLM.
+        """
+        filtered = [r for r in results if r.score >= self.min_context_score]
+        return filtered
+
+    def _extract_sources(self, results: List[RetrievalResult]) -> List[str]:
+        """
+        Return unique source names from the retrieved chunks.
+        """
+        seen = set()
+        sources = []
+
+        for result in results:
+            chunk = result.chunk
+
+            source_name = None
+            if hasattr(chunk, "metadata") and isinstance(chunk.metadata, dict):
+                source_name = chunk.metadata.get("title")
+
+            if not source_name:
+                source_name = getattr(chunk, "source_path", "Unknown Source")
+
+            if source_name not in seen:
+                seen.add(source_name)
+                sources.append(source_name)
+
+        return sources
+
+    def _build_chunk_scores(self, results: List[RetrievalResult]) -> List[Dict]:
+        """
+        Return per-chunk score details for UI/debugging.
+        """
+        items = []
+
+        for i, result in enumerate(results, start=1):
+            items.append(
+                {
+                    "rank": i,
+                    "chunk_number": i,
+                    "chunk_id": result.chunk.chunk_id,
+                    "source": (
+                        result.chunk.metadata.get("title")
+                        if hasattr(result.chunk, "metadata") and isinstance(result.chunk.metadata, dict)
+                        else getattr(result.chunk, "source_path", "Unknown Source")
+                    ),
+                    "score": float(result.score),
+                    "dense_score": float(result.dense_score),
+                    "sparse_score": float(result.sparse_score),
+                }
+            )
+
+        return items
+
+    def _estimate_confidence(
+        self,
+        retrieved_results: List[RetrievalResult],
+        filtered_results: List[RetrievalResult],
+        answer_text: str,
+    ) -> float:
+        """
+        Heuristic confidence score.
+
+        Factors:
+        - average score of filtered chunks
+        - best chunk score
+        - number of supporting chunks
+        - penalty when no/weak context
+        - penalty if answer explicitly says information is missing
+        """
+        if not retrieved_results or not filtered_results:
+            return 0.0
+
+        scores = [r.score for r in filtered_results]
+        avg_score = sum(scores) / len(scores)
+        max_score = max(scores)
+
+        support_factor = min(len(filtered_results) / max(self.top_k, 1), 1.0)
+
+        confidence = (
+            0.45 * avg_score +
+            0.35 * max_score +
+            0.20 * support_factor
+        )
+
+        lower_answer = (answer_text or "").lower()
+        uncertainty_markers = [
+            "not enough information",
+            "insufficient information",
+            "not available in the provided documents",
+            "cannot determine from the provided context",
+            "partially supported",
+            "missing from the provided documents",
+        ]
+
+        if any(marker in lower_answer for marker in uncertainty_markers):
+            confidence *= 0.65
+
+        confidence = max(0.0, min(confidence, 1.0))
+        return confidence
+
+    def _build_retrieval_reasoning(
+        self,
+        query: str,
+        retrieved_results: List[RetrievalResult],
+        filtered_results: List[RetrievalResult],
+    ) -> str:
+        if not retrieved_results:
+            return (
+                f"No chunks were retrieved for the query: '{query}'. "
+                "The answer was generated without usable context."
+            )
+
+        removed_count = len(retrieved_results) - len(filtered_results)
+
+        reasoning = (
+            f"Retrieved {len(retrieved_results)} chunks for query '{query}'. "
+            f"Filtered to {len(filtered_results)} chunks using min_context_score={self.min_context_score:.2f}. "
+        )
+
+        if filtered_results:
+            top = filtered_results[0]
+            reasoning += (
+                f"Top supporting chunk was '{top.chunk.chunk_id}' "
+                f"with hybrid score {top.score:.3f} "
+                f"(dense={top.dense_score:.3f}, sparse={top.sparse_score:.3f}). "
+            )
+
+        if removed_count > 0:
+            reasoning += f"Excluded {removed_count} low-scoring chunk(s) before generation."
+
+        return reasoning
+
+    def _safe_fallback_answer(self) -> str:
+        return (
+            "Answer: The provided documents do not contain enough information to answer this question reliably.\n"
+            "Evidence Used: None"
+        )
+
     def generate(
         self,
         query: str,
         use_verification: bool = False,
     ) -> Dict:
         """
-        Generate a grounded response to a query.
-        
-        Args:
-            query: User question
-            use_verification: Verify response grounding (requires extra LLM call)
-            
-        Returns:
-            Response dictionary with answer, sources, and metadata
+        Generate an answer from retrieved context.
         """
-        # Step 1: Retrieve relevant context
-        retrieved_chunks, retrieval_reasoning = self.retriever.retrieve_with_reasoning(
-            query=query,
-            top_k=self.top_k,
-        )
-        
-        # Filter by minimum score
-        relevant_chunks = [
-            c for c in retrieved_chunks
-            if c.score >= self.min_context_score
-        ]
-        
-        if not relevant_chunks:
+        retrieved_results = self.retriever.retrieve(query=query, top_k=self.top_k)
+        filtered_results = self._filter_relevant_results(retrieved_results)
+
+        if not filtered_results:
+            answer = self._safe_fallback_answer()
             return {
-                **ResponseBuilder.build_fallback_response(
-                    query,
-                    reason="Could not find relevant documentation.",
+                "answer": answer,
+                "sources": [],
+                "confidence": 0.0,
+                "num_context_chunks": 0,
+                "chunk_scores": [],
+                "retrieval_reasoning": self._build_retrieval_reasoning(
+                    query=query,
+                    retrieved_results=retrieved_results,
+                    filtered_results=filtered_results,
                 ),
-                "retrieval_reasoning": retrieval_reasoning,
             }
-        
-        # Step 2: Build RAG prompt with context
-        context_texts = [chunk.content for chunk in relevant_chunks]
-        sources = [chunk.source_doc for chunk in relevant_chunks]
-        
-        rag_prompt = GroundingPrompts.build_rag_prompt(
+
+        prompt = GroundingPrompts.user_prompt(query, filtered_results)
+        raw_answer = self.llm_fn(prompt)
+
+        if not raw_answer or not raw_answer.strip():
+            raw_answer = self._safe_fallback_answer()
+
+        sources = self._extract_sources(filtered_results)
+        chunk_scores = self._build_chunk_scores(filtered_results)
+        confidence = self._estimate_confidence(
+            retrieved_results=retrieved_results,
+            filtered_results=filtered_results,
+            answer_text=raw_answer,
+        )
+        reasoning = self._build_retrieval_reasoning(
             query=query,
-            context_chunks=context_texts,
-            sources=sources,
+            retrieved_results=retrieved_results,
+            filtered_results=filtered_results,
         )
-        
-        # Step 3: Generate response
-        try:
-            answer = self.llm_fn(rag_prompt)
-        except Exception as e:
-            return {
-                **ResponseBuilder.build_fallback_response(
-                    query,
-                    reason=f"LLM error: {str(e)}",
-                ),
-                "retrieval_reasoning": retrieval_reasoning,
-            }
-        
-        # Step 4: Optional verification
-        verification = None
-        if use_verification:
-            verification_prompt = GroundingPrompts.build_verification_prompt(
-                original_query=query,
-                retrieved_chunks=context_texts,
-                model_response=answer,
-            )
-            try:
-                verification = self.llm_fn(verification_prompt)
-            except Exception as e:
-                print(f"Verification failed: {e}")
-        
-        # Step 5: Build final response
-        response = ResponseBuilder.build_response(
-            answer=answer,
-            sources=sources,
-            confidence=min(1.0, sum(c.score for c in relevant_chunks) / len(relevant_chunks)),
-        )
-        
-        # Add metadata
-        response["retrieval_reasoning"] = retrieval_reasoning
-        response["num_context_chunks"] = len(relevant_chunks)
-        response["verification"] = verification
-        response["chunk_scores"] = [
-            {"chunk_id": c.chunk_id, "score": c.score}
-            for c in relevant_chunks
-        ]
-        
-        return response
-    
-    def generate_batch(
-        self,
-        queries: List[str],
-        use_verification: bool = False,
-    ) -> List[Dict]:
-        """Generate responses for multiple queries"""
-        return [
-            self.generate(query, use_verification=use_verification)
-            for query in queries
-        ]
-    
-    def generate_with_followup(
-        self,
-        query: str,
-        followup_questions: List[str],
-    ) -> List[Dict]:
-        """
-        Generate response and handle follow-up questions,
-        maintaining context relevance.
-        """
-        results = [self.generate(query)]
-        
-        # For follow-ups, use same context
-        first_response = results[0]
-        sources = first_response.get("sources", [])
-        
-        for followup in followup_questions:
-            followup_result = self.generate(followup)
-            results.append(followup_result)
-        
-        return results
+
+        return {
+            "answer": raw_answer,
+            "sources": sources,
+            "confidence": confidence,
+            "num_context_chunks": len(filtered_results),
+            "chunk_scores": chunk_scores,
+            "retrieval_reasoning": reasoning,
+        }
